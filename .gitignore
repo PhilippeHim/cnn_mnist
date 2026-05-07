@@ -38,7 +38,6 @@ runs/
 # Autres projets
 images/
 cnn_chiffres.ipynb
-contours_seuillage_gradient.ipynb
 contour_tp.ipynb
 contours_tp.md
 Detection et Reconnaissance d'objet.pdf

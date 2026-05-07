@@ -1,0 +1,48 @@
+# Système
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environnements locaux
+.env
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Données téléchargées ou générées
+data/
+df/test_exif_backup/
+
+# Modèles entraînés et artefacts ML
+*.pth
+*.pt
+*.ckpt
+checkpoints/
+runs/
+
+# Copies locales de notebooks
+* copy.ipynb
+* copie.ipynb
+
+# Autres projets
+images/
+cnn_chiffres.ipynb
+contours_seuillage_gradient.ipynb
+contour_tp.ipynb
+contours_tp.md
+Detection et Reconnaissance d'objet.pdf
+opencv_cours.ipynb
+opencv_TP.ipynb
+opencv_TP.md
+projet_opencv_cours.ipynb

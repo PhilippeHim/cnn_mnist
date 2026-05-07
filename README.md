@@ -121,6 +121,535 @@ Ils expliquent notamment :
 
 Le but est que le notebook puisse être lu comme un support d'apprentissage, pas seulement comme une suite de cellules à exécuter.
 
+## Fonctionnement du notebook CNN sur MNIST
+
+Le notebook `CNN_mnist_.ipynb` constitue le cœur du projet. Il met en place un pipeline complet de deep learning : préparation des données, construction du modèle, entraînement, évaluation, diagnostic des erreurs et sauvegarde du modèle.
+
+L'idée n'est pas seulement d'obtenir un bon score, mais de comprendre ce qui se passe à chaque étape.
+
+### Vérification des dépendances
+
+Le notebook commence par vérifier que les bibliothèques nécessaires sont bien installées :
+
+```python
+required_packages = {
+    "numpy": "numpy",
+    "matplotlib": "matplotlib",
+    "torch": "torch",
+    "torchvision": "torchvision",
+}
+```
+
+Cette cellule rend le notebook plus simple à exécuter avec `Run All`. Si une dépendance manque, elle est installée dans l'environnement Python actif du notebook.
+
+Une vérification spécifique est aussi faite pour NumPy :
+
+```python
+if numpy_major >= 2:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "numpy<2"])
+```
+
+Cette précaution vient du fait que certaines versions de PyTorch sont sensibles aux versions de NumPy. Le but est d'éviter une erreur d'import dès le début du TP.
+
+### Choix du device
+
+Le notebook choisit automatiquement le meilleur matériel disponible :
+
+```python
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
+```
+
+Cela permet d'utiliser :
+
+- `mps` sur les Mac Apple Silicon ;
+- `cuda` sur une carte graphique NVIDIA ;
+- `cpu` si aucune accélération GPU n'est disponible.
+
+Ce choix est important, car l'entraînement d'un réseau de neurones peut être beaucoup plus rapide sur GPU.
+
+### Reproductibilité
+
+Deux graines aléatoires sont fixées :
+
+```python
+torch.manual_seed(42)
+np.random.seed(42)
+```
+
+Cela permet de rendre les résultats plus stables d'une exécution à l'autre. Sans cela, le découpage train/validation, l'ordre des images ou l'initialisation des poids peuvent changer légèrement à chaque lancement.
+
+### Centralisation des paramètres
+
+Les principaux paramètres sont regroupés dans une seule cellule :
+
+```python
+EPOCHS = 12
+BATCH_SIZE = 64
+LEARNING_RATE = 0.0005
+DROPOUT_RATE = 0.25
+USE_AUGMENTATION = True
+AUGMENTATION_DEGREES = 0
+MODEL_VERSION = "cnn_3conv"
+```
+
+Cette organisation facilite l'expérimentation. Au lieu de modifier le code à plusieurs endroits, on peut ajuster les paramètres principaux au même endroit.
+
+Chaque paramètre a un rôle précis :
+
+- `EPOCHS` : nombre de passages complets sur le jeu d'entraînement ;
+- `BATCH_SIZE` : nombre d'images traitées avant une mise à jour des poids ;
+- `LEARNING_RATE` : taille du pas d'apprentissage ;
+- `DROPOUT_RATE` : proportion de neurones désactivés pendant l'entraînement ;
+- `USE_AUGMENTATION` : activation ou non de l'augmentation de données ;
+- `AUGMENTATION_DEGREES` : angle maximal de rotation pendant l'augmentation ;
+- `MODEL_VERSION` : choix entre le CNN à 2 convolutions et celui à 3 convolutions.
+
+### Transformation des images MNIST
+
+Les images MNIST sont chargées avec `torchvision.datasets.MNIST`. Avant d'être données au modèle, elles sont transformées :
+
+```python
+basic_transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.1307,), (0.3081,)),
+])
+```
+
+La transformation `ToTensor()` convertit l'image en tenseur PyTorch. Une image MNIST devient un tenseur de forme :
+
+```text
+1 x 28 x 28
+```
+
+Le `1` correspond au canal unique de l'image, car MNIST est en niveaux de gris.
+
+La normalisation :
+
+```python
+transforms.Normalize((0.1307,), (0.3081,))
+```
+
+centre et réduit les valeurs avec la moyenne et l'écart-type classiques de MNIST. Cela aide le modèle à apprendre plus proprement, car les valeurs d'entrée sont placées sur une échelle plus stable.
+
+### Augmentation de données
+
+Le notebook prévoit aussi une transformation augmentée :
+
+```python
+augmented_transform = transforms.Compose([
+    transforms.RandomAffine(
+        degrees=AUGMENTATION_DEGREES,
+        translate=(0.08, 0.08),
+        scale=(0.98, 1.10)
+    ),
+    transforms.ToTensor(),
+    transforms.Normalize((0.1307,), (0.3081,)),
+])
+```
+
+L'augmentation de données consiste à modifier légèrement les images d'entraînement pour rendre le modèle plus robuste.
+
+Ici, plusieurs variations peuvent être appliquées :
+
+- petite rotation ;
+- légère translation horizontale ou verticale ;
+- léger changement d'échelle.
+
+L'idée est simple : un chiffre reste le même même s'il est un peu décalé, un peu plus grand, un peu plus petit ou légèrement incliné. En voyant ces variations pendant l'entraînement, le modèle apprend à mieux généraliser.
+
+L'augmentation est réservée au jeu d'entraînement :
+
+```python
+train_transform = augmented_transform if USE_AUGMENTATION else basic_transform
+```
+
+La validation et le test restent sans augmentation. C'est important, car on veut mesurer le modèle sur des données stables, pas sur des images modifiées aléatoirement à chaque exécution.
+
+### Découpage train, validation et test
+
+Le dataset MNIST contient déjà un train set et un test set. Le notebook ajoute un jeu de validation en prélevant 10 % du train set :
+
+```python
+VALIDATION_RATIO = 0.1
+validation_size = int(len(mnist_train_full_basic) * VALIDATION_RATIO)
+train_size = len(mnist_train_full_basic) - validation_size
+```
+
+On obtient donc trois ensembles :
+
+- `train` : sert à apprendre les poids du modèle ;
+- `validation` : sert à suivre l'apprentissage pendant les essais ;
+- `test` : sert à mesurer la performance finale.
+
+Cette séparation évite de juger le modèle uniquement sur les images qu'il a utilisées pour apprendre.
+
+### DataLoaders et batches
+
+Les `DataLoader` découpent les données en lots d'images :
+
+```python
+train_loader = DataLoader(mnist_train, batch_size=BATCH_SIZE, shuffle=True)
+validation_loader = DataLoader(mnist_validation, batch_size=BATCH_SIZE, shuffle=False)
+test_loader = DataLoader(mnist_test, batch_size=BATCH_SIZE, shuffle=False)
+```
+
+Un batch est un paquet d'images envoyé au modèle en une seule fois. Avec `BATCH_SIZE = 64`, le modèle traite 64 images avant de mettre à jour ses poids.
+
+Le train loader utilise `shuffle=True` pour mélanger les images à chaque epoch. Cela évite que le modèle voie toujours les chiffres dans le même ordre.
+
+### Vérification de la répartition des classes
+
+Le notebook compte le nombre d'images pour chaque chiffre :
+
+```python
+def count_classes(dataset, num_classes=10):
+    counts = np.zeros(num_classes, dtype=int)
+    for _, label in dataset:
+        counts[label] += 1
+    return counts
+```
+
+Cette étape permet de vérifier que les classes sont correctement représentées. Si un chiffre était beaucoup moins présent que les autres, le modèle pourrait moins bien l'apprendre.
+
+### Visualisation des images
+
+Avant d'entraîner le modèle, le notebook affiche quelques images MNIST :
+
+```python
+plt.imshow(image, cmap="gray")
+```
+
+Cette étape paraît simple, mais elle est importante : elle permet de vérifier ce que le modèle va réellement recevoir. En machine learning, il faut toujours regarder les données avant de faire confiance aux résultats.
+
+Comme les images ont été normalisées, une fonction permet de les remettre dans une échelle affichable :
+
+```python
+def denormalize_mnist(image):
+    return image * 0.3081 + 0.1307
+```
+
+### Architecture du CNN
+
+Deux architectures sont disponibles dans le notebook :
+
+- `MNISTCNN2Conv` : version simple avec 2 convolutions ;
+- `MNISTCNN3Conv` : version plus expressive avec 3 convolutions.
+
+Un CNN est divisé en deux grandes parties :
+
+- `features` : extraction des caractéristiques visuelles ;
+- `classifier` : transformation de ces caractéristiques en prédiction finale.
+
+Dans la version à 3 convolutions, le trajet de l'image est le suivant :
+
+```text
+Entrée : 1 x 28 x 28
+-> Conv 1 : 16 x 28 x 28
+-> ReLU
+-> MaxPool : 16 x 14 x 14
+-> Conv 2 : 32 x 14 x 14
+-> ReLU
+-> MaxPool : 32 x 7 x 7
+-> Conv 3 : 64 x 7 x 7
+-> ReLU
+-> Flatten : 64 * 7 * 7
+-> Linear : 128
+-> ReLU
+-> Dropout
+-> Linear : 10
+```
+
+La dernière couche produit 10 scores, un pour chaque chiffre de `0` à `9`.
+
+### Rôle des convolutions
+
+Une convolution apprend des filtres capables de détecter de petits motifs dans l'image :
+
+- traits ;
+- bords ;
+- courbes ;
+- coins ;
+- formes locales.
+
+Dans le notebook, les convolutions utilisent :
+
+```python
+nn.Conv2d(in_channels=1, out_channels=16, kernel_size=3, padding=1)
+```
+
+Cela signifie :
+
+- `in_channels=1` : l'image d'entrée a un seul canal ;
+- `out_channels=16` : le modèle apprend 16 filtres différents ;
+- `kernel_size=3` : chaque filtre regarde une zone de `3 x 3` pixels ;
+- `padding=1` : on conserve la même taille spatiale après la convolution.
+
+Au fil des couches, le modèle passe de motifs simples à des motifs plus abstraits.
+
+### Rôle de ReLU
+
+Après chaque convolution, le notebook utilise `ReLU` :
+
+```python
+nn.ReLU()
+```
+
+ReLU introduit de la non-linéarité. Sans cette étape, le réseau serait beaucoup moins capable d'apprendre des relations complexes.
+
+De manière simple, ReLU garde les valeurs positives et remplace les valeurs négatives par zéro.
+
+### Rôle du max-pooling
+
+Le max-pooling réduit la taille de l'image :
+
+```python
+nn.MaxPool2d(kernel_size=2, stride=2)
+```
+
+Avec ce paramétrage :
+
+```text
+28 x 28 -> 14 x 14
+14 x 14 -> 7 x 7
+```
+
+Le max-pooling garde l'information la plus forte dans chaque petite zone. Cela réduit le nombre de calculs et rend le modèle un peu plus robuste aux petits décalages.
+
+### Rôle de Flatten et des couches linéaires
+
+Après les convolutions, les données ont encore une forme spatiale :
+
+```text
+64 x 7 x 7
+```
+
+La couche `Flatten` transforme cette sortie en vecteur :
+
+```python
+nn.Flatten()
+```
+
+Puis les couches linéaires prennent la décision finale :
+
+```python
+nn.Linear(64 * 7 * 7, 128)
+nn.Linear(128, 10)
+```
+
+La première couche résume les caractéristiques dans 128 neurones. La dernière couche produit les 10 scores de classification.
+
+### Rôle du dropout
+
+Le dropout est utilisé juste avant la dernière couche :
+
+```python
+nn.Dropout(p=dropout_rate)
+```
+
+Pendant l'entraînement, il désactive aléatoirement une partie des neurones. Avec `DROPOUT_RATE = 0.25`, environ 25 % des activations sont mises à zéro à chaque passage.
+
+Le but est de limiter le surapprentissage. Le modèle ne peut pas dépendre toujours des mêmes neurones : il doit apprendre des représentations plus générales.
+
+En mode évaluation, le dropout est désactivé automatiquement avec :
+
+```python
+model.eval()
+```
+
+### Vérification des dimensions internes
+
+Le notebook crée un faux batch pour vérifier les dimensions :
+
+```python
+dummy_batch = torch.randn(4, 1, 28, 28).to(device)
+```
+
+Cette vérification permet de confirmer que la sortie des convolutions et la sortie finale ont les formes attendues :
+
+- sortie des convolutions ;
+- sortie du modèle ;
+- 10 scores par image.
+
+C'est une étape très utile pour éviter les erreurs de dimension, fréquentes quand on construit un CNN.
+
+### Loss et optimizer
+
+La fonction de perte utilisée est :
+
+```python
+criterion = nn.CrossEntropyLoss()
+```
+
+Elle est adaptée à une classification multi-classes. Le modèle produit 10 scores, et la loss mesure l'écart entre ces scores et la vraie classe.
+
+L'optimiseur utilisé est Adam :
+
+```python
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+```
+
+Adam ajuste les poids du modèle pour faire diminuer la loss.
+
+### Boucle d'entraînement
+
+La fonction `train_one_epoch` entraîne le modèle pendant une epoch :
+
+```python
+model.train()
+optimizer.zero_grad()
+outputs = model(images)
+loss = criterion(outputs, labels)
+loss.backward()
+optimizer.step()
+```
+
+Les étapes sont les suivantes :
+
+1. passer le modèle en mode entraînement ;
+2. remettre les gradients à zéro ;
+3. faire passer les images dans le modèle ;
+4. calculer la loss ;
+5. calculer les gradients avec `backward()` ;
+6. mettre à jour les poids avec `optimizer.step()`.
+
+Une epoch correspond à un passage complet sur toutes les images d'entraînement.
+
+### Évaluation du modèle
+
+La fonction `evaluate` mesure les performances sans modifier les poids :
+
+```python
+model.eval()
+with torch.no_grad():
+    outputs = model(images)
+```
+
+Deux éléments sont importants :
+
+- `model.eval()` désactive certains comportements d'entraînement, comme le dropout ;
+- `torch.no_grad()` évite de calculer les gradients, ce qui économise de la mémoire.
+
+Cette fonction est utilisée pour la validation et le test.
+
+### Courbes d'apprentissage
+
+Le notebook conserve l'historique de la loss et de l'accuracy :
+
+```python
+history = {
+    "train_loss": [],
+    "train_accuracy": [],
+    "validation_loss": [],
+    "validation_accuracy": [],
+}
+```
+
+Les courbes permettent de comprendre le comportement du modèle :
+
+- si la loss baisse, le modèle apprend ;
+- si l'accuracy monte, le modèle prédit mieux ;
+- si le train progresse mais pas la validation, il peut y avoir surapprentissage ;
+- si tout stagne, les paramètres ou l'architecture peuvent être à revoir.
+
+### Évaluation sur le test set
+
+Une fois l'entraînement terminé, le modèle est évalué sur le test set :
+
+```python
+test_loss, test_accuracy, test_predictions, test_labels = evaluate(
+    model,
+    test_loader,
+    criterion,
+    device
+)
+```
+
+Le test set sert à obtenir une mesure finale sur des images que le modèle n'a pas utilisées pour apprendre ni pour ajuster les paramètres.
+
+### Matrice de confusion et précision par classe
+
+Le notebook construit une matrice de confusion :
+
+```python
+matrix[true_label, pred_label] += 1
+```
+
+Cette matrice permet de voir quelles erreurs le modèle fait réellement. Par exemple, elle permet de repérer si des `9` sont souvent prédits comme des `8`, ou si un chiffre est moins bien reconnu que les autres.
+
+Le notebook calcule aussi l'accuracy par classe :
+
+```python
+per_class_accuracy = cm.diagonal() / cm.sum(axis=1)
+```
+
+Cette étape est essentielle dans le projet. Elle permet de ne pas se contenter d'une très bonne accuracy globale et de vérifier si chaque chiffre est correctement reconnu.
+
+### Visualisation des prédictions et des erreurs
+
+Le notebook affiche quelques prédictions :
+
+```python
+show_predictions(model, test_loader, device, n_images=12)
+```
+
+Il affiche aussi les erreurs :
+
+```python
+show_mistakes(model, test_loader, device, max_images=20)
+```
+
+Cette étape rend le diagnostic beaucoup plus concret. Une erreur peut être compréhensible si le chiffre est mal écrit, ambigu ou proche d'un autre chiffre.
+
+### Sauvegarde du modèle
+
+Le modèle entraîné est sauvegardé avec :
+
+```python
+torch.save(model.state_dict(), "cnn_mnist.pth")
+```
+
+Le fichier `cnn_mnist.pth` contient les poids appris par le modèle. Il permet de réutiliser le modèle sans refaire tout l'entraînement.
+
+### Test sur des images personnelles
+
+Le notebook contient aussi une section pour tester des images personnelles rangées dans `df/test`.
+
+Comme une photo réelle ne ressemble pas directement à MNIST, un prétraitement spécifique est appliqué :
+
+- passage en niveaux de gris ;
+- correction éventuelle de l'orientation EXIF ;
+- amélioration du contraste ;
+- suppression d'une zone haute parasite ;
+- détection des pixels foncés correspondant à l'encre ;
+- recadrage autour du chiffre ;
+- conversion au style MNIST : fond noir, chiffre blanc ;
+- centrage dans une image carrée ;
+- redimensionnement en `28 x 28` ;
+- normalisation avec les statistiques MNIST.
+
+Cette étape montre une difficulté importante : un modèle entraîné sur MNIST fonctionne très bien sur MNIST, mais les images réelles nécessitent souvent une adaptation pour ressembler au format d'entraînement.
+
+### Diagnostic de l'orientation EXIF
+
+Certaines photos prises avec un smartphone peuvent apparaître tournées selon le logiciel utilisé. Le notebook ajoute donc une cellule de diagnostic :
+
+```python
+debug_image_orientation("df/test/0/0_008.jpeg")
+```
+
+Elle affiche :
+
+- l'image brute ;
+- l'image avec orientation EXIF appliquée ;
+- l'image prétraitée au format MNIST.
+
+Cela permet de comprendre si une erreur vient du modèle ou simplement d'une image mal orientée avant le prétraitement.
+
 ## Démarche d'amélioration du modèle
 
 Lors du premier lancement, le modèle a rapidement obtenu un très bon score global, proche de 98 %. Cependant, l'accuracy globale ne suffisait pas à juger finement la qualité du modèle : certaines classes étaient moins bien reconnues que d'autres.
